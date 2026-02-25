@@ -262,8 +262,8 @@ class InfyModuleSimulator:
         return self._handle_read_system_fixed()
 
     def _handle_read_module_info(self):
-        vmax = int(self.cap_voltage_max)
-        vmin = int(self.cap_voltage_min)
+        vmax = int(self.cap_voltage_max * 10)
+        vmin = int(self.cap_voltage_min * 10)
         imax = int(self.max_current * 10)
         prate = int(self.cap_power_rated / 10)
         return struct.pack('>HHHH', vmax, vmin, imax, prate)
