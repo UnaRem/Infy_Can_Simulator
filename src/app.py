@@ -19,7 +19,10 @@ class InfyModuleSimulator:
         self.current_out = 0.0         # 实际输出电流
         self.set_voltage = 500.0       # 设定电压 (默认)
         self.set_current = 10.0        # 设定电流 (默认)
-        self.max_current = 20.0        # 模块最大能力
+        self.max_current = 25.6        # 模块最大能力
+        self.cap_voltage_max = 750.0
+        self.cap_voltage_min = 100.0
+        self.cap_power_rated = 15000.0
         
         # 状态位
         self.is_power_on = False       # 开关机状态
@@ -117,11 +120,11 @@ class InfyModuleSimulator:
             is_for_me = True
             
         if is_for_me:
-            self._route_command(cmd_no, msg.data, src_addr, device_no)
+            self._route_command(cmd_no, msg.data, src_addr, device_no, dest_addr)
 
     # --- 4. 指令路由层 (Command Router) ---
 
-    def _route_command(self, cmd, data, remote_src, device_mode):
+    def _route_command(self, cmd, data, remote_src, device_mode, dest_addr):
         """根据命令号分发逻辑 [cite: 135]"""
         
         reply_data = None
@@ -137,12 +140,24 @@ class InfyModuleSimulator:
         # 0x04: 读模块状态 (Walkin, Temp, Alarms)
         elif cmd == 0x04:
             reply_data = self._handle_read_status()
+
+        elif cmd == 0x08:
+            reply_data = self._handle_read_system_fixed()
+
+        elif cmd == 0x09:
+            reply_data = self._handle_read_module_fixed()
+
+        elif cmd == 0x0A:
+            reply_data = self._handle_read_module_info()
+
+        elif cmd == 0x0C:
+            reply_data = self._handle_read_module_external()
             
         # 0x1A: 开关机控制 
         elif cmd == 0x1A:
             self._handle_power_control(data)
             # 广播命令通常无回复，但在点对点模式下需回复状态
-            if device_mode == 0x0A: 
+            if device_mode == 0x0A and dest_addr != 0x3F:
                 reply_data = self._handle_read_power_state()
 
         # 0x1B: 设模块电压(mV) 总电流(mA) [cite: 161]
@@ -150,6 +165,11 @@ class InfyModuleSimulator:
             self._handle_set_output(data)
             # 根据协议，需回复当前设定值
             reply_data = self._handle_read_output_setting()
+
+        elif cmd == 0x1C:
+            self._handle_set_output_fixed(data)
+            if dest_addr != 0x3F:
+                reply_data = self._handle_read_output_setting()
 
         # 如果生成了回复数据，则发送
         if reply_data:
@@ -232,6 +252,29 @@ class InfyModuleSimulator:
     def _handle_read_system_float(self):
         # 简化：单模块系统，系统电压等于模块电压
         return self._handle_read_module_float()
+
+    def _handle_read_system_fixed(self):
+        v_int = max(0, int(self.voltage_out * 1000))
+        c_int = max(0, int(self.current_out * 1000))
+        return struct.pack('>II', v_int, c_int)
+
+    def _handle_read_module_fixed(self):
+        return self._handle_read_system_fixed()
+
+    def _handle_read_module_info(self):
+        vmax = int(self.cap_voltage_max)
+        vmin = int(self.cap_voltage_min)
+        imax = int(self.max_current * 10)
+        prate = int(self.cap_power_rated / 10)
+        return struct.pack('>HHHH', vmax, vmin, imax, prate)
+
+    def _handle_read_module_external(self):
+        ext_v = max(0, int(self.voltage_out * 10))
+        allow_i = int(self.max_current * 10) if self.is_power_on else 0
+        return struct.pack('>HHHH', ext_v, allow_i, 0, 0)
+
+    def _handle_set_output_fixed(self, data):
+        self._handle_set_output(data)
 
 if __name__ == "__main__":
     try:

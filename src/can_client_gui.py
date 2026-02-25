@@ -11,7 +11,7 @@ class CANClientGUI:
     def __init__(self):
         self.window = tk.Tk()
         self.window.title("CAN总线客户端")
-        self.window.geometry("800x600")
+        self.window.geometry("1024x768")
         self.window.resizable(True, True)
         
         # CAN总线相关
@@ -35,11 +35,17 @@ class CANClientGUI:
             ("读系统电压电流", 0x01, None),
             ("读模块电压电流", 0x03, None),
             ("读模块状态", 0x04, None),
+            ("读系统电压电流(定点)", 0x08, None),
+            ("读模块电压电流(定点)", 0x09, None),
+            ("读模块N信息", 0x0A, None),
+            ("读模块N外部信息", 0x0C, None),
             ("开机", 0x1A, bytearray([0x00])),
             ("关机", 0x1A, bytearray([0x01])),
             ("设定500V/10A", 0x1B, self.make_output_data(500.0, 10.0)),
             ("设定400V/8A", 0x1B, self.make_output_data(400.0, 8.0)),
             ("设定600V/15A", 0x1B, self.make_output_data(600.0, 15.0)),
+            ("设置输出700V/10A(定点)", 0x1C, self.make_output_data(700.0, 10.0)),
+            ("设置输出200V/5A(定点)", 0x1C, self.make_output_data(200.0, 5.0)),
         ]
         
         self.setup_ui()
@@ -421,6 +427,27 @@ class CANClientGUI:
                 return f"电压{voltage:.2f}V, 电流{current:.2f}A"
             else:
                 return f"数据长度不足"
+        elif cmd == 0x08 or cmd == 0x09:
+            if len(data) >= 8:
+                v_int = struct.unpack('>I', data[0:4])[0]
+                c_int = struct.unpack('>I', data[4:8])[0]
+                voltage = v_int / 1000.0
+                current = c_int / 1000.0
+                return f"电压{voltage:.1f}V, 电流{current:.1f}A"
+            else:
+                return f"数据长度不足"
+        elif cmd == 0x0A:
+            if len(data) >= 8:
+                vmax, vmin, imax, prate = struct.unpack('>HHHH', data[0:8])
+                return f"Vmax {vmax}V, Vmin {vmin}V, Imax {imax/10:.1f}A, Prate {prate*10}W"
+            else:
+                return f"数据长度不足"
+        elif cmd == 0x0C:
+            if len(data) >= 8:
+                ext_v, allow_i = struct.unpack('>HH', data[0:4])
+                return f"外部电压{ext_v/10:.1f}V, 允许电流{allow_i/10:.1f}A"
+            else:
+                return f"数据长度不足"
                 
         elif cmd == 0x04:  # 模块状态
             if len(data) >= 5:
@@ -436,7 +463,7 @@ class CANClientGUI:
             else:
                 return f"数据长度不足"
                 
-        elif cmd == 0x1B:  # 输出设定
+        elif cmd == 0x1B or cmd == 0x1C:  # 输出设定
             if len(data) >= 8:
                 v_int = struct.unpack('>I', data[0:4])[0]
                 c_int = struct.unpack('>I', data[4:8])[0]
