@@ -9,16 +9,18 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class InfyModuleSimulator:
-    def __init__(self, module_id=0x00, group_id=0x00):
+    def __init__(self, module_id=0x00, group_id=0x00, group_size=1):
         # --- 1. 设备状态层 (Device State) ---
         self.module_id = module_id     # 模块地址 (0x00~0x3B) [cite: 133]
         self.group_id = group_id       # 组号
+        self.group_size = max(1, int(group_size))
         
         # 模拟电气参数
         self.voltage_out = 0.0         # 实际输出电压
         self.current_out = 0.0         # 实际输出电流
         self.set_voltage = 500.0       # 设定电压 (默认)
         self.set_current = 10.0        # 设定电流 (默认)
+        self.set_total_current = 10.0  # 设定总电流 (默认)
         self.max_current = 25.6        # 模块最大能力
         self.cap_voltage_max = 750.0
         self.cap_voltage_min = 100.0
@@ -27,6 +29,10 @@ class InfyModuleSimulator:
         # 状态位
         self.is_power_on = False       # 开关机状态
         self.is_connected = False      # 通讯状态
+        self.status_table_0 = 0
+        self.status_table_1 = 0
+        self.status_table_2 = 0
+        self.status_table_3 = 0
         
         # --- CAN配置 ---
         self.bus = None
@@ -128,6 +134,7 @@ class InfyModuleSimulator:
         """根据命令号分发逻辑 [cite: 135]"""
         
         reply_data = None
+        reply_allowed = self._should_reply(device_mode, dest_addr)
         
         # 0x01: 读系统电压电流 (浮点)
         if cmd == 0x01:
@@ -142,7 +149,7 @@ class InfyModuleSimulator:
             reply_data = self._handle_read_status()
 
         elif cmd == 0x08:
-            reply_data = self._handle_read_system_fixed()
+            reply_data = self._handle_read_system_fixed(device_mode == 0x0B)
 
         elif cmd == 0x09:
             reply_data = self._handle_read_module_fixed()
@@ -156,24 +163,28 @@ class InfyModuleSimulator:
         # 0x1A: 开关机控制 
         elif cmd == 0x1A:
             self._handle_power_control(data)
-            # 广播命令通常无回复，但在点对点模式下需回复状态
-            if device_mode == 0x0A and dest_addr != 0x3F:
+            if reply_allowed:
                 reply_data = self._handle_read_power_state()
 
         # 0x1B: 设模块电压(mV) 总电流(mA) [cite: 161]
         elif cmd == 0x1B:
-            self._handle_set_output(data)
-            # 根据协议，需回复当前设定值
-            reply_data = self._handle_read_output_setting()
+            self._handle_set_output(data, use_total=True)
+            if reply_allowed:
+                reply_data = self._handle_read_output_setting(use_total=True)
 
         elif cmd == 0x1C:
-            self._handle_set_output_fixed(data)
-            if dest_addr != 0x3F:
-                reply_data = self._handle_read_output_setting()
+            self._handle_set_output(data, use_total=False)
+            if reply_allowed:
+                reply_data = self._handle_read_output_setting(use_total=False)
 
         # 如果生成了回复数据，则发送
-        if reply_data:
+        if reply_allowed and reply_data:
             self._send_response(cmd, reply_data, remote_src)
+
+    def _should_reply(self, device_mode, dest_addr):
+        if dest_addr == 0x3F:
+            return False
+        return True
 
     def _send_response(self, cmd, data, target_addr):
         """构造回复帧"""
@@ -200,7 +211,16 @@ class InfyModuleSimulator:
         # Byte0-3: 状态表3,2,1,0
         # Byte4: 环温 (int8)
         temp = 25
-        status_bytes = [0x00, 0x00, 0x00, 0x00, temp, 0x00, 0x00, 0x00]
+        status_bytes = [
+            0x00,
+            0x00,
+            self.group_id & 0xFF,
+            self.status_table_3 & 0xFF,
+            temp & 0xFF,
+            self.status_table_2 & 0xFF,
+            self.status_table_1 & 0xFF,
+            self.status_table_0 & 0xFF,
+        ]
         return bytearray(status_bytes)
 
     def _handle_power_control(self, data):
@@ -210,7 +230,7 @@ class InfyModuleSimulator:
             self.is_power_on = True
             # 简单模拟：开机后电压升至设定值
             self.voltage_out = self.set_voltage
-            self.current_out = self.set_current / 2 # 假装带了一半负载
+            self.current_out = self.set_current
             logging.info("执行开机")
         else:
             self.is_power_on = False
@@ -223,7 +243,7 @@ class InfyModuleSimulator:
         state = 0x00 if self.is_power_on else 0x01
         return bytearray([state, 0, 0, 0, 0, 0, 0, 0])
 
-    def _handle_set_output(self, data):
+    def _handle_set_output(self, data, use_total):
         """CMD 0x1B: 设定电压电流 (定点数) [cite: 161]"""
         # Byte0-1: 电压 (mV) MSB
         # Byte2-3: 电流 (mA) MSB
@@ -231,35 +251,48 @@ class InfyModuleSimulator:
         # 查看: Byte0-3 Voltage(mV), Byte4-7 Current(mA)
         # 文档这里表格有点混淆，需仔细看 Source 162 的 Byte 顺序
         # 0x1B 表格: Byte0(MSB)..Byte3(LSB) 是电压
-        
+        if len(data) < 8:
+            return
+
         v_val = struct.unpack('>I', data[0:4])[0] # mV
         c_val = struct.unpack('>I', data[4:8])[0] # mA
-        
+
         self.set_voltage = v_val / 1000.0
-        self.set_current = c_val / 1000.0
-        
+        if use_total:
+            self.set_total_current = c_val / 1000.0
+            self.set_current = self.set_total_current / self.group_size
+        else:
+            self.set_current = c_val / 1000.0
+            self.set_total_current = self.set_current * self.group_size
+
         if self.is_power_on:
             self.voltage_out = self.set_voltage
-            
-        logging.info(f"设定参数: {self.set_voltage}V, {self.set_current}A")
+            self.current_out = self.set_current
 
-    def _handle_read_output_setting(self):
+        logging.info(f"设定参数: {self.set_voltage}V, {self.set_current}A, 总电流 {self.set_total_current}A")
+
+    def _handle_read_output_setting(self, use_total):
         """回复当前设定值"""
         v_int = int(self.set_voltage * 1000)
-        c_int = int(self.set_current * 1000)
+        c_source = self.set_total_current if use_total else self.set_current
+        c_int = int(c_source * 1000)
         return struct.pack('>II', v_int, c_int)
 
     def _handle_read_system_float(self):
         # 简化：单模块系统，系统电压等于模块电压
         return self._handle_read_module_float()
 
-    def _handle_read_system_fixed(self):
+    def _handle_read_system_fixed(self, aggregate=False):
         v_int = max(0, int(self.voltage_out * 1000))
-        c_int = max(0, int(self.current_out * 1000))
+        current_value = self._get_group_total_current() if aggregate else self.current_out
+        c_int = max(0, int(current_value * 1000))
         return struct.pack('>II', v_int, c_int)
 
     def _handle_read_module_fixed(self):
         return self._handle_read_system_fixed()
+
+    def _get_group_total_current(self):
+        return self.current_out * self.group_size
 
     def _handle_read_module_info(self):
         vmax = int(self.cap_voltage_max * 10)
@@ -274,12 +307,12 @@ class InfyModuleSimulator:
         return struct.pack('>HHHH', ext_v, allow_i, 0, 0)
 
     def _handle_set_output_fixed(self, data):
-        self._handle_set_output(data)
+        self._handle_set_output(data, use_total=False)
 
 if __name__ == "__main__":
     try:
         # 启动模拟器，假设本模块地址 0x00, 组号 0x00
-        sim = InfyModuleSimulator(module_id=0x00, group_id=0x00)
+        sim = InfyModuleSimulator(module_id=0x00, group_id=0x00, group_size=1)
         sim.start()
     except KeyboardInterrupt:
         logging.info("模拟器已停止")
